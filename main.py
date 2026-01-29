@@ -1,0 +1,410 @@
+import sys
+import json
+import io
+import os
+import textwrap
+import fitz  # PyMuPDF
+import matplotlib
+import matplotlib.pyplot as plt
+from PyQt6.QtWidgets import (QApplication, QMainWindow, QGraphicsView, QGraphicsScene, 
+                             QGraphicsPixmapItem, QFileDialog, QToolBar, 
+                             QMessageBox, QGraphicsItem, QLabel, QDockWidget, QListWidget,
+                             QWidget, QVBoxLayout, QDialog, QTextEdit, QPushButton, 
+                             QDialogButtonBox, QSpinBox, QComboBox, QFormLayout, QHBoxLayout)
+from PyQt6.QtGui import QPixmap, QImage, QAction, QColor, QFont, QFontDatabase, QPainterPath
+from PyQt6.QtCore import Qt, QBuffer, QIODevice
+
+# Use Agg backend for headless rendering
+matplotlib.use('Agg')
+
+# --- Defaults ---
+DEFAULT_FONT = "Fira Code"
+DEFAULT_SIZE = 10
+DEFAULT_WRAP = 50  # Characters before wrapping
+
+class MarkPropertiesDialog(QDialog):
+    """Dialog to edit Text + Styling Options."""
+    def __init__(self, parent=None, title="Mark", 
+                 initial_text="", 
+                 initial_font=DEFAULT_FONT, 
+                 initial_size=DEFAULT_SIZE, 
+                 initial_width=DEFAULT_WRAP):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.resize(500, 400)
+        
+        layout = QVBoxLayout(self)
+        
+        # 1. Text Area
+        self.text_edit = QTextEdit()
+        self.text_edit.setPlainText(initial_text)
+        # Use a monospaced font for the editor itself
+        editor_font = QFont("Consolas", 11)
+        if "Fira Code" in QFontDatabase.families():
+            editor_font = QFont("Fira Code", 11)
+        self.text_edit.setFont(editor_font)
+        layout.addWidget(self.text_edit)
+        
+        # 2. Options Area
+        form_layout = QFormLayout()
+        
+        # Font Selection
+        self.font_combo = QComboBox()
+        # Populate with common code/math fonts
+        common_fonts = ["Fira Code", "Consolas", "Courier New", "Arial", "Times New Roman"]
+        # Add system fonts that match our list
+        installed = QFontDatabase.families()
+        for f in common_fonts:
+            if f in installed:
+                self.font_combo.addItem(f)
+        # Fallback if preferred fonts aren't found
+        if self.font_combo.count() == 0:
+            self.font_combo.addItem("Monospace")
+        
+        self.font_combo.setCurrentText(initial_font)
+        form_layout.addRow("Font:", self.font_combo)
+        
+        # Size Selection
+        self.size_spin = QSpinBox()
+        self.size_spin.setRange(5, 50)
+        self.size_spin.setValue(initial_size)
+        form_layout.addRow("Text Size:", self.size_spin)
+        
+        # Width Selection
+        self.width_spin = QSpinBox()
+        self.width_spin.setRange(10, 200)
+        self.width_spin.setValue(initial_width)
+        self.width_spin.setSuffix(" chars")
+        form_layout.addRow("Max Width:", self.width_spin)
+        
+        layout.addLayout(form_layout)
+        
+        # 3. Buttons
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def get_data(self):
+        return {
+            "text": self.text_edit.toPlainText(),
+            "font": self.font_combo.currentText(),
+            "size": self.size_spin.value(),
+            "width": self.width_spin.value()
+        }
+
+class LatexItem(QGraphicsPixmapItem):
+    """Movable, editable LaTeX annotation with custom styling."""
+    def __init__(self, mark_data, render_func, on_change_callback):
+        super().__init__()
+        self.mark_data = mark_data 
+        self.render_func = render_func
+        self.on_change_callback = on_change_callback
+        
+        self.setPos(mark_data['x'], mark_data['y'])
+        self.setFlags(QGraphicsItem.GraphicsItemFlag.ItemIsMovable | 
+                      QGraphicsItem.GraphicsItemFlag.ItemIsSelectable |
+                      QGraphicsItem.GraphicsItemFlag.ItemSendsGeometryChanges)
+        self.update_image()
+
+    def update_image(self):
+        pixmap = self.render_func(self.mark_data)
+        self.setPixmap(pixmap)
+
+    # --- THE FIX: Force the hit-box to be the full rectangle ---
+    def shape(self):
+        path = QPainterPath()
+        path.addRect(self.boundingRect())
+        return path
+    # -----------------------------------------------------------
+
+    def mouseDoubleClickEvent(self, event):
+        dialog = MarkPropertiesDialog(None, "Edit Mark", 
+                                      self.mark_data['text'],
+                                      self.mark_data.get('font', DEFAULT_FONT),
+                                      self.mark_data.get('size', DEFAULT_SIZE),
+                                      self.mark_data.get('width', DEFAULT_WRAP))
+        if dialog.exec():
+            new_data = dialog.get_data()
+            if new_data['text']:
+                self.mark_data.update(new_data)
+                self.update_image()
+                self.on_change_callback()
+        super().mouseDoubleClickEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        self.mark_data['x'] = self.x()
+        self.mark_data['y'] = self.y()
+        super().mouseReleaseEvent(event)
+        self.on_change_callback()
+
+class MarkLatexApp(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("MarkLatex V5 - Styled Text")
+        self.resize(1400, 900)
+
+        # -- State --
+        self.file_list = []
+        self.current_file_index = -1
+        self.doc = None
+        self.pdf_path = None
+        self.current_page_idx = 0
+        self.all_marks = {}
+        self.view_scale = 2.0 
+
+        # -- UI --
+        self.scene = QGraphicsScene()
+        self.view = QGraphicsView(self.scene)
+        self.setCentralWidget(self.view)
+        
+        self.create_toolbar()
+        self.create_sidebar()
+        
+        self.scene.mouseDoubleClickEvent = self.scene_double_click_handler
+
+    def create_toolbar(self):
+        toolbar = QToolBar()
+        self.addToolBar(toolbar)
+
+        btn_folder = QAction("Open Folder", self)
+        btn_folder.triggered.connect(self.open_folder_recursive)
+        toolbar.addAction(btn_folder)
+        
+        toolbar.addSeparator()
+        
+        self.lbl_status = QLabel(" No File ")
+        toolbar.addWidget(self.lbl_status)
+        
+        toolbar.addSeparator()
+
+        btn_export = QAction("Export PDF", self)
+        btn_export.triggered.connect(self.export_current_pdf)
+        toolbar.addAction(btn_export)
+        
+        self.status_bar = self.statusBar()
+
+    def create_sidebar(self):
+        dock = QDockWidget("PDF Files", self)
+        dock.setAllowedAreas(Qt.DockWidgetArea.LeftDockWidgetArea)
+        self.file_list_widget = QListWidget()
+        self.file_list_widget.itemClicked.connect(self.sidebar_file_clicked)
+        dock.setWidget(self.file_list_widget)
+        self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, dock)
+
+    # --- File Logic ---
+    def open_folder_recursive(self):
+        folder = QFileDialog.getExistingDirectory(self, "Select Folder")
+        if not folder: return
+        self.file_list = []
+        self.file_list_widget.clear()
+        for root, dirs, files in os.walk(folder):
+            for file in files:
+                if file.lower().endswith(".pdf") and not file.endswith("_marked.pdf"):
+                    full_path = os.path.join(root, file)
+                    self.file_list.append(full_path)
+                    self.file_list_widget.addItem(os.path.relpath(full_path, folder))
+        if self.file_list: self.load_file_by_index(0)
+
+    def load_file_by_index(self, index):
+        if not (0 <= index < len(self.file_list)): return
+        if self.pdf_path: self.save_sidecar() 
+
+        self.current_file_index = index
+        self.pdf_path = self.file_list[index]
+        self.doc = fitz.open(self.pdf_path)
+        self.current_page_idx = 0
+        self.all_marks = {}
+        
+        self.file_list_widget.setCurrentRow(index)
+        self.load_sidecar_data()
+        self.render_current_page()
+        self.setWindowTitle(f"MarkLatex - {os.path.basename(self.pdf_path)}")
+
+    def sidebar_file_clicked(self, item):
+        self.load_file_by_index(self.file_list_widget.row(item))
+
+    # --- Persistence ---
+    def get_sidecar_path(self):
+        if not self.pdf_path: return None
+        return os.path.splitext(self.pdf_path)[0] + ".mlat"
+
+    def save_sidecar(self):
+        if not self.pdf_path: return
+        # Marks are already updated in self.all_marks by reference/callbacks
+        path = self.get_sidecar_path()
+        try:
+            with open(path, 'w') as f:
+                json.dump({"pdf_path": self.pdf_path, "all_marks": self.all_marks}, f, indent=2)
+            self.status_bar.showMessage(f"Saved", 1000)
+        except: pass
+
+    def load_sidecar_data(self):
+        path = self.get_sidecar_path()
+        if path and os.path.exists(path):
+            try:
+                with open(path, 'r') as f:
+                    data = json.load(f)
+                    self.all_marks = {int(k): v for k, v in data.get("all_marks", {}).items()}
+            except: self.all_marks = {}
+
+    def ensure_page_list(self):
+        if self.current_page_idx not in self.all_marks:
+            self.all_marks[self.current_page_idx] = []
+
+    # --- Rendering ---
+    def render_latex(self, mark_data):
+        """Renders text using Matplotlib with custom font/size/wrap."""
+        text = mark_data['text']
+        font_name = mark_data.get('font', DEFAULT_FONT)
+        font_size = mark_data.get('size', DEFAULT_SIZE)
+        wrap_width = mark_data.get('width', DEFAULT_WRAP)
+        
+        # 1. Apply Wrapping
+        # We wrap lines manually to enforce the width limit
+        wrapped_text = "\n".join([textwrap.fill(line, width=wrap_width) for line in text.splitlines()])
+
+        buf = io.BytesIO()
+        fig = plt.figure(figsize=(0.1, 0.1))
+        fig.patch.set_alpha(0.0)
+        
+        try:
+            plt.text(0, 0, wrapped_text, 
+                     fontsize=font_size, 
+                     fontname=font_name,
+                     color='red', 
+                     va='bottom', ha='left')
+        except:
+            plt.text(0, 0, "FONT ERROR\n" + wrapped_text, fontsize=10, color='red')
+            
+        plt.axis('off')
+        
+        # High DPI for sharpness
+        plt.savefig(buf, format='png', bbox_inches='tight', pad_inches=0.05, dpi=200, transparent=True)
+        plt.close(fig)
+        buf.seek(0)
+        return QPixmap.fromImage(QImage.fromData(buf.read()))
+
+    def render_current_page(self):
+        if not self.doc: return
+        self.scene.clear()
+        
+        # Background
+        page = self.doc[self.current_page_idx]
+        pix = page.get_pixmap(matrix=fitz.Matrix(self.view_scale, self.view_scale))
+        img = QImage.fromData(pix.tobytes("ppm"))
+        bg = self.scene.addPixmap(QPixmap.fromImage(img))
+        bg.setZValue(-1)
+        bg.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, False)
+        self.scene.setSceneRect(0, 0, pix.width, pix.height)
+        
+        self.lbl_status.setText(f" Page {self.current_page_idx + 1} / {len(self.doc)} ")
+
+        # Marks
+        if self.current_page_idx in self.all_marks:
+            for m in self.all_marks[self.current_page_idx]:
+                # Ensure defaults for old files
+                if 'font' not in m: m['font'] = DEFAULT_FONT
+                if 'size' not in m: m['size'] = DEFAULT_SIZE
+                if 'width' not in m: m['width'] = DEFAULT_WRAP
+                
+                item = LatexItem(m, self.render_latex, self.save_sidecar)
+                self.scene.addItem(item)
+
+    # --- Interaction ---
+    def scene_double_click_handler(self, event):
+        item = self.scene.itemAt(event.scenePos(), self.view.transform())
+        
+        if (item is None or item.zValue() == -1) and self.doc:
+            # Create NEW Mark
+            pos = event.scenePos()
+            
+            # Show Dialog with Defaults
+            dialog = MarkPropertiesDialog(self, "Add Mark")
+            if dialog.exec():
+                data = dialog.get_data()
+                if data['text']:
+                    # Prepare Mark Data structure
+                    new_mark = {
+                        "text": data['text'],
+                        "x": pos.x(),
+                        "y": pos.y(),
+                        "font": data['font'],
+                        "size": data['size'],
+                        "width": data['width']
+                    }
+                    
+                    self.ensure_page_list()
+                    # Add to data list first
+                    self.all_marks[self.current_page_idx].append(new_mark)
+                    
+                    # Add to scene (pass reference to the dict object)
+                    item = LatexItem(new_mark, self.render_latex, self.save_sidecar)
+                    self.scene.addItem(item)
+                    self.save_sidecar()
+        else:
+            QGraphicsScene.mouseDoubleClickEvent(self.scene, event)
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key.Key_Delete:
+            for item in self.scene.selectedItems():
+                if isinstance(item, LatexItem):
+                    # Remove from data list
+                    if item.mark_data in self.all_marks[self.current_page_idx]:
+                        self.all_marks[self.current_page_idx].remove(item.mark_data)
+                    self.scene.removeItem(item)
+            self.save_sidecar()
+        # Page Navigation Keys
+        elif event.key() == Qt.Key.Key_Right:
+            if self.doc and self.current_page_idx < len(self.doc) - 1:
+                self.current_page_idx += 1
+                self.render_current_page()
+        elif event.key() == Qt.Key.Key_Left:
+            if self.doc and self.current_page_idx > 0:
+                self.current_page_idx -= 1
+                self.render_current_page()
+
+    def export_current_pdf(self):
+        if not self.doc: return
+        base = os.path.splitext(self.pdf_path)[0]
+        out_path = f"{base}_marked.pdf"
+        
+        export_doc = fitz.open(self.pdf_path)
+        
+        for p_idx, marks in self.all_marks.items():
+            if p_idx >= len(export_doc): continue
+            page = export_doc[p_idx]
+            page_rect = page.rect 
+            min_x, min_y, max_x, max_y = page_rect.x0, page_rect.y0, page_rect.x1, page_rect.y1
+            
+            for m in marks:
+                pix = self.render_latex(m)
+                ba = QBuffer()
+                ba.open(QIODevice.OpenModeFlag.ReadWrite)
+                pix.toImage().save(ba, "PNG")
+                
+                # Coords
+                x = m['x'] / self.view_scale
+                y = m['y'] / self.view_scale
+                w = pix.width() / self.view_scale
+                h = pix.height() / self.view_scale
+                
+                # Check bounds
+                if x < min_x: min_x = x
+                if y < min_y: min_y = y
+                if x + w > max_x: max_x = x + w
+                if y + h > max_y: max_y = y + h
+                
+                page.insert_image(fitz.Rect(x, y, x+w, y+h), stream=ba.data().data())
+            
+            if max_x > page_rect.x1 or max_y > page_rect.y1 or min_x < page_rect.x0 or min_y < page_rect.y0:
+                 page.set_mediabox(fitz.Rect(min_x, min_y, max_x, max_y))
+
+        export_doc.save(out_path)
+        QMessageBox.information(self, "Exported", f"Saved: {out_path}")
+
+if __name__ == "__main__":
+    app = QApplication(sys.argv)
+    window = MarkLatexApp()
+    window.show()
+    sys.exit(app.exec())
