@@ -11,7 +11,7 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QGraphicsView, QGraphics
                              QMessageBox, QGraphicsItem, QLabel, QDockWidget, QListWidget,
                              QWidget, QVBoxLayout, QDialog, QTextEdit, QPushButton, 
                              QDialogButtonBox, QSpinBox, QComboBox, QFormLayout, QHBoxLayout,
-                             QSlider)
+                             QSlider, QTreeWidget, QTreeWidgetItem)
 from PyQt6.QtGui import QPixmap, QImage, QAction, QColor, QFont, QFontDatabase, QPainterPath
 from PyQt6.QtSvgWidgets import QGraphicsSvgItem
 from PyQt6.QtSvg import QSvgRenderer
@@ -365,7 +365,8 @@ class MarkLatexApp(QMainWindow):
     def create_sidebar(self):
         dock = QDockWidget("PDF Files", self)
         dock.setAllowedAreas(Qt.DockWidgetArea.LeftDockWidgetArea)
-        self.file_list_widget = QListWidget()
+        self.file_list_widget = QTreeWidget()
+        self.file_list_widget.setHeaderHidden(True)
         self.file_list_widget.itemClicked.connect(self.sidebar_file_clicked)
         dock.setWidget(self.file_list_widget)
         self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, dock)
@@ -406,14 +407,17 @@ class MarkLatexApp(QMainWindow):
                 display_name = f"{clean_name} / {os.path.basename(full_path)}"
                 self.file_list.append(full_path)
                 self.file_student_folders.append(subfolder)
-                self.file_list_widget.addItem(display_name)
+                self.file_list_widget.addTopLevelItem(QTreeWidgetItem([display_name]))
         else:
             for root, dirs, files in os.walk(folder):
                 for file in files:
                     if file.lower().endswith(".pdf") and not file.endswith("_marked.pdf"):
                         full_path = os.path.join(root, file)
                         self.file_list.append(full_path)
-                        self.file_list_widget.addItem(os.path.relpath(full_path, folder))
+                        self.file_list_widget.addTopLevelItem(
+                            QTreeWidgetItem([os.path.relpath(full_path, folder)])
+                        )
+        self.refresh_remark_tree()
         self.update_moodle_indicator()
         if self.file_list: self.load_file_by_index(0)
 
@@ -431,13 +435,24 @@ class MarkLatexApp(QMainWindow):
         self.all_marks = {}
         self.undo_stack = []
         
-        self.file_list_widget.setCurrentRow(index)
+        self.file_list_widget.setCurrentItem(self.file_list_widget.topLevelItem(index))
         self.load_sidecar_data()
         self.render_current_page()
         self.setWindowTitle(f"MarkLatex - {os.path.basename(self.pdf_path)}")
 
     def sidebar_file_clicked(self, item):
-        self.load_file_by_index(self.file_list_widget.row(item))
+        if item.parent() is None:
+            index = self.file_list_widget.indexOfTopLevelItem(item)
+            self.load_file_by_index(index)
+            return
+        pdf_index = item.data(0, Qt.ItemDataRole.UserRole)
+        page_index = item.data(0, Qt.ItemDataRole.UserRole + 1)
+        if pdf_index is None or page_index is None:
+            return
+        self.load_file_by_index(pdf_index)
+        if self.doc and 0 <= page_index < len(self.doc):
+            self.current_page_idx = page_index
+            self.render_current_page()
 
     # --- Persistence ---
     def get_sidecar_path(self):
@@ -630,7 +645,7 @@ class MarkLatexApp(QMainWindow):
                 if 'size' not in m: m['size'] = DEFAULT_SIZE
                 if 'width' not in m: m['width'] = DEFAULT_WRAP
                 
-                item = LatexItem(m, self.render_latex, self.save_sidecar, self.push_undo_action)
+                item = LatexItem(m, self.render_latex, self.save_and_refresh, self.push_undo_action)
                 self.scene.addItem(item)
 
     # --- Interaction ---
@@ -665,9 +680,9 @@ class MarkLatexApp(QMainWindow):
                     })
                     
                     # Add to scene (pass reference to the dict object)
-                    item = LatexItem(new_mark, self.render_latex, self.save_sidecar, self.push_undo_action)
+                    item = LatexItem(new_mark, self.render_latex, self.save_and_refresh, self.push_undo_action)
                     self.scene.addItem(item)
-                    self.save_sidecar()
+                    self.save_and_refresh()
         else:
             QGraphicsScene.mouseDoubleClickEvent(self.scene, event)
 
@@ -695,7 +710,7 @@ class MarkLatexApp(QMainWindow):
                         })
                         self.all_marks[self.current_page_idx].remove(item.mark_data)
                     self.scene.removeItem(item)
-            self.save_sidecar()
+            self.save_and_refresh()
         elif event.modifiers() & Qt.KeyboardModifier.ControlModifier and event.key() == Qt.Key.Key_Z:
             self.undo_last_action()
         # Page Navigation Keys - Use Page Up/Page Down for page switching
@@ -840,8 +855,41 @@ class MarkLatexApp(QMainWindow):
             before = action["before"]
             mark["x"], mark["y"] = before
 
+        self.save_and_refresh()
+
+    def save_and_refresh(self):
         self.save_sidecar()
-        self.render_current_page()
+        self.refresh_remark_tree()
+
+    def refresh_remark_tree(self):
+        if not self.file_list_widget or self.file_list_widget.topLevelItemCount() == 0:
+            return
+        for i in range(self.file_list_widget.topLevelItemCount()):
+            parent_item = self.file_list_widget.topLevelItem(i)
+            parent_item.takeChildren()
+            pdf_path = self.file_list[i]
+            sidecar_path = os.path.splitext(pdf_path)[0] + ".mlat"
+            if not os.path.exists(sidecar_path):
+                continue
+            try:
+                with open(sidecar_path, 'r') as f:
+                    data = json.load(f)
+            except:
+                continue
+            all_marks = {int(k): v for k, v in data.get("all_marks", {}).items()}
+            remarks = []
+            for page_idx, marks in all_marks.items():
+                for mark in marks:
+                    text = mark.get("text", "").strip()
+                    if not text:
+                        continue
+                    remarks.append((page_idx, mark.get("y", 0), text))
+            remarks.sort(key=lambda item: (item[0], item[1]))
+            for page_idx, y_val, text in remarks:
+                child = QTreeWidgetItem([text])
+                child.setData(0, Qt.ItemDataRole.UserRole, i)
+                child.setData(0, Qt.ItemDataRole.UserRole + 1, page_idx)
+                parent_item.addChild(child)
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
