@@ -214,11 +214,13 @@ class MarkPropertiesDialog(QDialog):
 
 class LatexItem(QGraphicsPixmapItem):
     """Movable, editable LaTeX annotation with custom styling."""
-    def __init__(self, mark_data, render_func, on_change_callback):
+    def __init__(self, mark_data, render_func, on_change_callback, undo_callback=None):
         super().__init__()
         self.mark_data = mark_data 
         self.render_func = render_func
         self.on_change_callback = on_change_callback
+        self.undo_callback = undo_callback
+        self._drag_start = None
         
         self.setPos(mark_data['x'], mark_data['y'])
         self.setFlags(QGraphicsItem.GraphicsItemFlag.ItemIsMovable | 
@@ -240,6 +242,7 @@ class LatexItem(QGraphicsPixmapItem):
     # -----------------------------------------------------------
 
     def mouseDoubleClickEvent(self, event):
+        before_state = dict(self.mark_data)
         dialog = MarkPropertiesDialog(None, "Edit Mark", 
                                       self.mark_data['text'],
                                       self.mark_data.get('font', DEFAULT_FONT),
@@ -251,13 +254,32 @@ class LatexItem(QGraphicsPixmapItem):
                 self.mark_data.update(new_data)
                 self.update_image()
                 self.on_change_callback()
+                if self.undo_callback:
+                    self.undo_callback("edit", {
+                        "before": before_state,
+                        "mark": self.mark_data
+                    })
         super().mouseDoubleClickEvent(event)
 
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._drag_start = (self.x(), self.y())
+        super().mousePressEvent(event)
+
     def mouseReleaseEvent(self, event):
+        old_pos = self._drag_start
+        new_pos = (self.x(), self.y())
         self.mark_data['x'] = self.x()
         self.mark_data['y'] = self.y()
         super().mouseReleaseEvent(event)
         self.on_change_callback()
+        if old_pos and new_pos != old_pos and self.undo_callback:
+            self.undo_callback("move", {
+                "before": old_pos,
+                "after": new_pos,
+                "mark": self.mark_data
+            })
+        self._drag_start = None
 
 class MarkLatexApp(QMainWindow):
     def __init__(self):
@@ -276,6 +298,8 @@ class MarkLatexApp(QMainWindow):
         self.is_moodle_mode = False
         self.current_page_idx = 0
         self.all_marks = {}
+        self.undo_stack = []
+        self.undo_limit = 20
         # Removed view_scale - now using natural PDF coordinates (1:1 mapping)
 
         # -- UI --
@@ -331,6 +355,10 @@ class MarkLatexApp(QMainWindow):
         btn_export_all = QAction("Export All", self)
         btn_export_all.triggered.connect(self.export_all_pdfs)
         toolbar.addAction(btn_export_all)
+
+        btn_undo = QAction("Undo", self)
+        btn_undo.triggered.connect(self.undo_last_action)
+        toolbar.addAction(btn_undo)
         
         self.status_bar = self.statusBar()
 
@@ -401,6 +429,7 @@ class MarkLatexApp(QMainWindow):
         self.doc = fitz.open(self.pdf_path)
         self.current_page_idx = 0
         self.all_marks = {}
+        self.undo_stack = []
         
         self.file_list_widget.setCurrentRow(index)
         self.load_sidecar_data()
@@ -601,7 +630,7 @@ class MarkLatexApp(QMainWindow):
                 if 'size' not in m: m['size'] = DEFAULT_SIZE
                 if 'width' not in m: m['width'] = DEFAULT_WRAP
                 
-                item = LatexItem(m, self.render_latex, self.save_sidecar)
+                item = LatexItem(m, self.render_latex, self.save_sidecar, self.push_undo_action)
                 self.scene.addItem(item)
 
     # --- Interaction ---
@@ -630,9 +659,13 @@ class MarkLatexApp(QMainWindow):
                     self.ensure_page_list()
                     # Add to data list first
                     self.all_marks[self.current_page_idx].append(new_mark)
+                    self.push_undo_action("add", {
+                        "mark": new_mark,
+                        "page": self.current_page_idx
+                    })
                     
                     # Add to scene (pass reference to the dict object)
-                    item = LatexItem(new_mark, self.render_latex, self.save_sidecar)
+                    item = LatexItem(new_mark, self.render_latex, self.save_sidecar, self.push_undo_action)
                     self.scene.addItem(item)
                     self.save_sidecar()
         else:
@@ -656,9 +689,15 @@ class MarkLatexApp(QMainWindow):
                 if isinstance(item, LatexItem):
                     # Remove from data list
                     if item.mark_data in self.all_marks[self.current_page_idx]:
+                        self.push_undo_action("delete", {
+                            "mark": dict(item.mark_data),
+                            "page": self.current_page_idx
+                        })
                         self.all_marks[self.current_page_idx].remove(item.mark_data)
                     self.scene.removeItem(item)
             self.save_sidecar()
+        elif event.modifiers() & Qt.KeyboardModifier.ControlModifier and event.key() == Qt.Key.Key_Z:
+            self.undo_last_action()
         # Page Navigation Keys - Use Page Up/Page Down for page switching
         elif event.key() == Qt.Key.Key_PageUp:
             if self.doc and self.current_page_idx > 0:
@@ -768,6 +807,41 @@ class MarkLatexApp(QMainWindow):
             )
         else:
             QMessageBox.information(self, "Export All", "Exported all PDFs.")
+
+    def push_undo_action(self, action_type, payload):
+        payload["type"] = action_type
+        self.undo_stack.append(payload)
+        if len(self.undo_stack) > self.undo_limit:
+            self.undo_stack.pop(0)
+
+    def undo_last_action(self):
+        if not self.undo_stack:
+            return
+
+        action = self.undo_stack.pop()
+        action_type = action.get("type")
+
+        if action_type == "add":
+            page = action["page"]
+            mark = action["mark"]
+            if page in self.all_marks and mark in self.all_marks[page]:
+                self.all_marks[page].remove(mark)
+        elif action_type == "delete":
+            page = action["page"]
+            mark = action["mark"]
+            self.all_marks.setdefault(page, []).append(mark)
+        elif action_type == "edit":
+            before = action["before"]
+            mark = action.get("mark")
+            if mark in self.all_marks.get(self.current_page_idx, []):
+                mark.update(before)
+        elif action_type == "move":
+            mark = action["mark"]
+            before = action["before"]
+            mark["x"], mark["y"] = before
+
+        self.save_sidecar()
+        self.render_current_page()
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
