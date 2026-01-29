@@ -22,6 +22,76 @@ DEFAULT_FONT = "Fira Code"
 DEFAULT_SIZE = 10
 DEFAULT_WRAP = 50  # Characters before wrapping
 
+class CustomGraphicsView(QGraphicsView):
+    """Custom QGraphicsView that supports horizontal scrolling with Shift + mouse wheel."""
+    def __init__(self, scene=None):
+        super().__init__(scene)
+    
+    def keyPressEvent(self, event):
+        """Handle Page Up/Page Down keys for page navigation."""
+        # Check if the main window has a method for page navigation
+        parent = self.parent()
+        if hasattr(parent, 'prev_page') and hasattr(parent, 'next_page'):
+            if event.key() == Qt.Key.Key_PageUp:
+                parent.prev_page()
+                event.accept()
+                return
+            elif event.key() == Qt.Key.Key_PageDown:
+                parent.next_page()
+                event.accept()
+                return
+        # For other keys, let the parent handle them
+        super().keyPressEvent(event)
+    
+    def wheelEvent(self, event):
+        """Handle mouse wheel events with Shift key for horizontal scrolling and Ctrl key for zooming."""
+        # Check if Ctrl key is pressed for zooming
+        if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
+            # Get the scroll amount (positive = down, negative = up)
+            delta = event.angleDelta().y()
+            
+            # Calculate zoom factor (positive delta = zoom in, negative = zoom out)
+            zoom_factor = 1.1 if delta > 0 else 1.0 / 1.1
+            
+            # Get the cursor position relative to the view
+            cursor_pos = event.position()
+            
+            # Map cursor position to scene coordinates before zoom
+            old_pos = self.mapToScene(cursor_pos.toPoint())
+            
+            # Apply zoom
+            self.scale(zoom_factor, zoom_factor)
+            
+            # Adjust scroll bars to keep cursor position fixed
+            new_pos = self.mapToScene(cursor_pos.toPoint())
+            delta_pos = new_pos - old_pos
+            self.horizontalScrollBar().setValue(int(self.horizontalScrollBar().value() + delta_pos.x()))
+            self.verticalScrollBar().setValue(int(self.verticalScrollBar().value() + delta_pos.y()))
+            
+            # Accept the event to prevent default scrolling
+            event.accept()
+        # Check if Shift key is pressed for horizontal scrolling
+        elif event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
+            # Get the current horizontal scroll bar
+            h_scroll = self.horizontalScrollBar()
+            
+            # Get the scroll amount (positive = down, negative = up)
+            # Convert vertical scroll to horizontal scroll
+            delta = event.angleDelta().y()
+            
+            # Apply the scroll (invert direction to match natural scrolling)
+            current_value = h_scroll.value()
+            new_value = current_value - delta
+            
+            # Set the new scroll position
+            h_scroll.setValue(new_value)
+            
+            # Accept the event to prevent default vertical scrolling
+            event.accept()
+        else:
+            # If no modifier keys are pressed, use default vertical scrolling behavior
+            super().wheelEvent(event)
+
 class MarkPropertiesDialog(QDialog):
     """Dialog to edit Text + Styling Options."""
     def __init__(self, parent=None, title="Mark", 
@@ -151,11 +221,11 @@ class MarkLatexApp(QMainWindow):
         self.pdf_path = None
         self.current_page_idx = 0
         self.all_marks = {}
-        self.view_scale = 2.0 
+        self.view_scale = 8.0  # Increased to 8x for maximum resolution and clarity
 
         # -- UI --
         self.scene = QGraphicsScene()
-        self.view = QGraphicsView(self.scene)
+        self.view = CustomGraphicsView(self.scene)
         self.setCentralWidget(self.view)
         
         self.create_toolbar()
@@ -172,9 +242,18 @@ class MarkLatexApp(QMainWindow):
         toolbar.addAction(btn_folder)
         
         toolbar.addSeparator()
+
+        # Page Navigation Buttons
+        btn_prev_page = QAction("< Page", self)
+        btn_prev_page.triggered.connect(self.prev_page)
+        toolbar.addAction(btn_prev_page)
         
         self.lbl_status = QLabel(" No File ")
         toolbar.addWidget(self.lbl_status)
+
+        btn_next_page = QAction("Page >", self)
+        btn_next_page.triggered.connect(self.next_page)
+        toolbar.addAction(btn_next_page)
         
         toolbar.addSeparator()
 
@@ -279,8 +358,8 @@ class MarkLatexApp(QMainWindow):
             
         plt.axis('off')
         
-        # High DPI for sharpness
-        plt.savefig(buf, format='png', bbox_inches='tight', pad_inches=0.05, dpi=200, transparent=True)
+        # High DPI for sharpness - increased to 600 to match 8x PDF resolution
+        plt.savefig(buf, format='png', bbox_inches='tight', pad_inches=0.05, dpi=600, transparent=True)
         plt.close(fig)
         buf.seek(0)
         return QPixmap.fromImage(QImage.fromData(buf.read()))
@@ -345,6 +424,18 @@ class MarkLatexApp(QMainWindow):
         else:
             QGraphicsScene.mouseDoubleClickEvent(self.scene, event)
 
+    def prev_page(self):
+        """Navigate to the previous page."""
+        if self.doc and self.current_page_idx > 0:
+            self.current_page_idx -= 1
+            self.render_current_page()
+
+    def next_page(self):
+        """Navigate to the next page."""
+        if self.doc and self.current_page_idx < len(self.doc) - 1:
+            self.current_page_idx += 1
+            self.render_current_page()
+
     def keyPressEvent(self, event):
         if event.key() == Qt.Key.Key_Delete:
             for item in self.scene.selectedItems():
@@ -354,14 +445,14 @@ class MarkLatexApp(QMainWindow):
                         self.all_marks[self.current_page_idx].remove(item.mark_data)
                     self.scene.removeItem(item)
             self.save_sidecar()
-        # Page Navigation Keys
-        elif event.key() == Qt.Key.Key_Right:
-            if self.doc and self.current_page_idx < len(self.doc) - 1:
-                self.current_page_idx += 1
-                self.render_current_page()
-        elif event.key() == Qt.Key.Key_Left:
+        # Page Navigation Keys - Use Page Up/Page Down for page switching
+        elif event.key() == Qt.Key.Key_PageUp:
             if self.doc and self.current_page_idx > 0:
                 self.current_page_idx -= 1
+                self.render_current_page()
+        elif event.key() == Qt.Key.Key_PageDown:
+            if self.doc and self.current_page_idx < len(self.doc) - 1:
+                self.current_page_idx += 1
                 self.render_current_page()
 
     def export_current_pdf(self):
