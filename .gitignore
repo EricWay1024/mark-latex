@@ -1,1 +1,39 @@
 venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+envs/
+.venv/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# PyInstaller
+build/
+dist/
+*.spec
+
+# NSIS
+installer.nsi
+MarkLatex_Installer.exe
+
+# Test and build artifacts
+MarkLatex_README.txt
+MarkLatex_SHA256.txt
+*.log
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+Desktop.ini

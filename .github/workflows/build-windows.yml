@@ -1,0 +1,88 @@
+name: Build Windows Executable
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  release:
+    types: [published]
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.10'
+        architecture: 'x64'
+        
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install pyinstaller
+        
+    - name: Build executable
+      run: |
+        python build_simple.py
+        
+    - name: Upload executable
+      uses: actions/upload-artifact@v3
+      with:
+        name: MarkLatex-Windows
+        path: dist/MarkLatex.exe
+        
+    - name: Create checksum
+      run: |
+        Get-FileHash dist\MarkLatex.exe -Algorithm SHA256 | Out-File MarkLatex_SHA256.txt
+        Get-Content MarkLatex_SHA256.txt
+        
+    - name: Upload checksum
+      uses: actions/upload-artifact@v3
+      with:
+        name: MarkLatex-Checksum
+        path: MarkLatex_SHA256.txt
+
+  release:
+    needs: build-windows
+    runs-on: windows-latest
+    if: github.event_name == 'release'
+    
+    steps:
+    - name: Download executable
+      uses: actions/download-artifact@v3
+      with:
+        name: MarkLatex-Windows
+        path: dist/
+        
+    - name: Download checksum
+      uses: actions/download-artifact@v3
+      with:
+        name: MarkLatex-Checksum
+        path: ./
+        
+    - name: Upload to release
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ github.event.release.upload_url }}
+        asset_path: ./dist/MarkLatex.exe
+        asset_name: MarkLatex.exe
+        asset_content_type: application/octet-stream
+        
+    - name: Upload checksum to release
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ github.event.release.upload_url }}
+        asset_path: ./MarkLatex_SHA256.txt
+        asset_name: MarkLatex_SHA256.txt
+        asset_content_type: text/plain
