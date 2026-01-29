@@ -5,12 +5,16 @@ A lightweight desktop application for academics to grade PDF assignments with st
 ## Features
 
 - **Batch Processing**: Recursively load all PDFs from a folder
+- **Moodle Folder Support**: Detect Moodle-style submission folders and label PDFs by student name
 - **Non-Destructive Editing**: Annotations saved in separate `.mlat` files, original PDFs remain untouched
 - **Custom Styled Text**: Add annotations with custom fonts, sizes, and text wrapping
 - **LaTeX Support**: Render mathematical formulas using Matplotlib
 - **Smart Export**: Automatically expand PDF canvas if annotations go out of bounds
+- **Export All**: Batch-export all PDFs and warn about unmarked files
+- **Undo**: Ctrl+Z and toolbar undo button for per-PDF edits (max depth 20)
 - **Enhanced Navigation**: Use Page Up/Down keys for easy page switching
 - **High DPI Rendering**: Sharp annotations at 300 DPI
+- **Remarks Tree**: Sidebar shows remark subitems under each PDF for quick jumping
 
 ## Quick Start
 
@@ -26,8 +30,8 @@ A lightweight desktop application for academics to grade PDF assignments with st
 
 3. **Open a Folder**
    - Click "Open Folder" in the toolbar
-   - Select a folder containing PDF files
-   - The application will load all PDFs recursively
+   - Select a folder containing PDF files, or a Moodle-unzipped submission folder
+   - The application will load all PDFs recursively or map Moodle submissions by student
 
 4. **Add Annotations**
    - Double-click on any PDF page to add a new annotation
@@ -37,16 +41,18 @@ A lightweight desktop application for academics to grade PDF assignments with st
 
 5. **Export Marked PDFs**
    - Click "Export PDF" to save a new PDF with all annotations
-   - The exported file will have `_marked.pdf` suffix
+   - Click "Export All" to export every PDF in the list (warnings shown for unmarked files)
+   - Exported files use the `_marked.pdf` suffix
 
 ## User Interface
 
-- **Left Sidebar**: List of PDF files in the selected folder
+- **Left Sidebar**: Tree of PDFs with remark subitems (click a remark to jump to its page)
 - **Main Area**: PDF page display with annotations
-- **Toolbar**: Navigation buttons and folder selection
+- **Toolbar**: Navigation buttons, Moodle mode indicator, export tools, and undo
 - **Keyboard Shortcuts**:
   - `Page Up/Down`: Navigate between pages
   - `Delete`: Remove selected annotations
+  - `Ctrl+Z`: Undo last change (per PDF)
   - `Ctrl + Mouse Wheel`: Zoom in/out
   - `Shift + Mouse Wheel`: Horizontal scrolling
 
@@ -74,7 +80,6 @@ When exporting, the application:
 ## Known Issues
 
 - Memory usage increases with large numbers of PDFs
-- No undo/redo functionality (coming soon)
 - Stylus support is limited
 
 ## License
