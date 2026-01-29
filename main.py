@@ -267,9 +267,13 @@ class MarkLatexApp(QMainWindow):
 
         # -- State --
         self.file_list = []
+        self.file_student_folders = []
         self.current_file_index = -1
         self.doc = None
         self.pdf_path = None
+        self.root_folder = None
+        self.current_student_folder = None
+        self.is_moodle_mode = False
         self.current_page_idx = 0
         self.all_marks = {}
         # Removed view_scale - now using natural PDF coordinates (1:1 mapping)
@@ -283,6 +287,14 @@ class MarkLatexApp(QMainWindow):
         self.create_sidebar()
         
         self.scene.mouseDoubleClickEvent = self.scene_double_click_handler
+
+    def update_moodle_indicator(self):
+        if self.is_moodle_mode:
+            self.lbl_moodle_mode.setText(" Moodle mode ")
+            self.lbl_moodle_mode.setStyleSheet("color: #1f7a1f; font-weight: bold;")
+            self.lbl_moodle_mode.setVisible(True)
+        else:
+            self.lbl_moodle_mode.setVisible(False)
 
     def create_toolbar(self):
         toolbar = QToolBar()
@@ -305,12 +317,20 @@ class MarkLatexApp(QMainWindow):
         btn_next_page = QAction("Page >", self)
         btn_next_page.triggered.connect(self.next_page)
         toolbar.addAction(btn_next_page)
+
+        self.lbl_moodle_mode = QLabel(" Moodle mode ")
+        self.lbl_moodle_mode.setVisible(False)
+        toolbar.addWidget(self.lbl_moodle_mode)
         
         toolbar.addSeparator()
 
         btn_export = QAction("Export PDF", self)
         btn_export.triggered.connect(self.export_current_pdf)
         toolbar.addAction(btn_export)
+
+        btn_export_all = QAction("Export All", self)
+        btn_export_all.triggered.connect(self.export_all_pdfs)
+        toolbar.addAction(btn_export_all)
         
         self.status_bar = self.statusBar()
 
@@ -327,13 +347,46 @@ class MarkLatexApp(QMainWindow):
         folder = QFileDialog.getExistingDirectory(self, "Select Folder")
         if not folder: return
         self.file_list = []
+        self.file_student_folders = []
         self.file_list_widget.clear()
-        for root, dirs, files in os.walk(folder):
-            for file in files:
-                if file.lower().endswith(".pdf") and not file.endswith("_marked.pdf"):
-                    full_path = os.path.join(root, file)
-                    self.file_list.append(full_path)
-                    self.file_list_widget.addItem(os.path.relpath(full_path, folder))
+        self.root_folder = folder
+        self.is_moodle_mode = False
+
+        root_pdfs = [
+            f for f in os.listdir(folder)
+            if f.lower().endswith(".pdf") and not f.endswith("_marked.pdf")
+            and os.path.isfile(os.path.join(folder, f))
+        ]
+        subfolders = [
+            d for d in os.listdir(folder)
+            if os.path.isdir(os.path.join(folder, d))
+        ]
+
+        moodle_entries = []
+        for subfolder in subfolders:
+            sub_path = os.path.join(folder, subfolder)
+            for root, dirs, files in os.walk(sub_path):
+                for file in files:
+                    if file.lower().endswith(".pdf") and not file.endswith("_marked.pdf"):
+                        full_path = os.path.join(root, file)
+                        moodle_entries.append((subfolder, full_path))
+
+        if moodle_entries and not root_pdfs:
+            self.is_moodle_mode = True
+            for subfolder, full_path in moodle_entries:
+                clean_name = subfolder.split("_", 1)[0]
+                display_name = f"{clean_name} / {os.path.basename(full_path)}"
+                self.file_list.append(full_path)
+                self.file_student_folders.append(subfolder)
+                self.file_list_widget.addItem(display_name)
+        else:
+            for root, dirs, files in os.walk(folder):
+                for file in files:
+                    if file.lower().endswith(".pdf") and not file.endswith("_marked.pdf"):
+                        full_path = os.path.join(root, file)
+                        self.file_list.append(full_path)
+                        self.file_list_widget.addItem(os.path.relpath(full_path, folder))
+        self.update_moodle_indicator()
         if self.file_list: self.load_file_by_index(0)
 
     def load_file_by_index(self, index):
@@ -342,6 +395,9 @@ class MarkLatexApp(QMainWindow):
 
         self.current_file_index = index
         self.pdf_path = self.file_list[index]
+        self.current_student_folder = (
+            self.file_student_folders[index] if self.is_moodle_mode else None
+        )
         self.doc = fitz.open(self.pdf_path)
         self.current_page_idx = 0
         self.all_marks = {}
@@ -615,18 +671,34 @@ class MarkLatexApp(QMainWindow):
 
     def export_current_pdf(self):
         if not self.doc: return
-        base = os.path.splitext(self.pdf_path)[0]
-        out_path = f"{base}_marked.pdf"
+        out_path = self.build_export_path(self.pdf_path, self.current_student_folder)
+        self.export_pdf_with_marks(self.pdf_path, self.all_marks, out_path)
+        QMessageBox.information(self, "Exported", f"Saved: {out_path}")
+
+    def build_export_path(self, pdf_path, student_folder):
+        if self.is_moodle_mode and self.root_folder and student_folder:
+            out_root = os.path.join(
+                os.path.dirname(self.root_folder),
+                "marked",
+                os.path.basename(self.root_folder)
+            )
+            student_dir = os.path.join(out_root, student_folder)
+            os.makedirs(student_dir, exist_ok=True)
+            base_name = os.path.splitext(os.path.basename(pdf_path))[0]
+            return os.path.join(student_dir, f"{base_name}_marked.pdf")
+        base = os.path.splitext(pdf_path)[0]
+        return f"{base}_marked.pdf"
+
+    def export_pdf_with_marks(self, pdf_path, marks, out_path):
+        export_doc = fitz.open(pdf_path)
         
-        export_doc = fitz.open(self.pdf_path)
-        
-        for p_idx, marks in self.all_marks.items():
+        for p_idx, page_marks in marks.items():
             if p_idx >= len(export_doc): continue
             page = export_doc[p_idx]
             page_rect = page.rect 
             min_x, min_y, max_x, max_y = page_rect.x0, page_rect.y0, page_rect.x1, page_rect.y1
             
-            for m in marks:
+            for m in page_marks:
                 pix = self.render_latex(m)
                 ba = QBuffer()
                 ba.open(QIODevice.OpenModeFlag.ReadWrite)
@@ -650,7 +722,52 @@ class MarkLatexApp(QMainWindow):
                  page.set_mediabox(fitz.Rect(min_x, min_y, max_x, max_y))
 
         export_doc.save(out_path)
-        QMessageBox.information(self, "Exported", f"Saved: {out_path}")
+
+    def export_all_pdfs(self):
+        if not self.file_list:
+            QMessageBox.information(self, "Export All", "No PDFs to export.")
+            return
+
+        current_index = self.current_file_index
+        current_page = self.current_page_idx
+        current_pdf_path = self.pdf_path
+        current_student_folder = self.current_student_folder
+
+        unmarked = []
+        for index, pdf_path in enumerate(self.file_list):
+            student_folder = self.file_student_folders[index] if self.is_moodle_mode else None
+            marks = {}
+            sidecar_path = os.path.splitext(pdf_path)[0] + ".mlat"
+            if os.path.exists(sidecar_path):
+                try:
+                    with open(sidecar_path, 'r') as f:
+                        data = json.load(f)
+                        marks = {int(k): v for k, v in data.get("all_marks", {}).items()}
+                except:
+                    marks = {}
+            if not any(marks.values()):
+                unmarked.append(os.path.basename(pdf_path))
+
+            out_path = self.build_export_path(pdf_path, student_folder)
+            self.export_pdf_with_marks(pdf_path, marks, out_path)
+
+        if current_pdf_path:
+            self.pdf_path = current_pdf_path
+            self.current_student_folder = current_student_folder
+            self.current_file_index = current_index
+            self.doc = fitz.open(current_pdf_path)
+            self.current_page_idx = current_page
+            self.load_sidecar_data()
+            self.render_current_page()
+
+        if unmarked:
+            QMessageBox.information(
+                self,
+                "Export All",
+                "Exported all PDFs. These had no marks:\n" + "\n".join(unmarked)
+            )
+        else:
+            QMessageBox.information(self, "Export All", "Exported all PDFs.")
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
