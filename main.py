@@ -10,7 +10,8 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QGraphicsView, QGraphics
                              QGraphicsPixmapItem, QFileDialog, QToolBar, 
                              QMessageBox, QGraphicsItem, QLabel, QDockWidget, QListWidget,
                              QWidget, QVBoxLayout, QDialog, QTextEdit, QPushButton, 
-                             QDialogButtonBox, QSpinBox, QComboBox, QFormLayout, QHBoxLayout)
+                             QDialogButtonBox, QSpinBox, QComboBox, QFormLayout, QHBoxLayout,
+                             QSlider)
 from PyQt6.QtGui import QPixmap, QImage, QAction, QColor, QFont, QFontDatabase, QPainterPath
 from PyQt6.QtSvgWidgets import QGraphicsSvgItem
 from PyQt6.QtSvg import QSvgRenderer
@@ -22,7 +23,7 @@ matplotlib.use('Agg')
 # --- Defaults ---
 DEFAULT_FONT = "Fira Code"
 DEFAULT_SIZE = 10
-DEFAULT_WRAP = 50  # Characters before wrapping
+DEFAULT_WRAP = 30  # Characters before wrapping
 RENDER_DPI = 300  # DPI for Matplotlib rendering
 
 class CustomGraphicsView(QGraphicsView):
@@ -97,19 +98,31 @@ class CustomGraphicsView(QGraphicsView):
 
 class MarkPropertiesDialog(QDialog):
     """Dialog to edit Text + Styling Options."""
-    def __init__(self, parent=None, title="Mark", 
-                 initial_text="", 
-                 initial_font=DEFAULT_FONT, 
-                 initial_size=DEFAULT_SIZE, 
+    # Predefined common marks
+    PREDEFINED_MARKS = ["correct", "nice", "good", "important", "review", "check"]
+
+    def __init__(self, parent=None, title="Mark",
+                 initial_text="",
+                 initial_font=DEFAULT_FONT,
+                 initial_size=DEFAULT_SIZE,
                  initial_width=DEFAULT_WRAP):
         super().__init__(parent)
         self.setWindowTitle(title)
         self.resize(500, 400)
-        
+
         layout = QVBoxLayout(self)
-        
-        # 1. Text Area
+
+        # 1. Common Marks Selection
+        self.mark_combo = QComboBox()
+        self.mark_combo.addItems(self.PREDEFINED_MARKS)
+        self.mark_combo.currentTextChanged.connect(self.on_mark_selected)
+        layout.addWidget(self.mark_combo)
+
+        # 2. Text Area
         self.text_edit = QTextEdit()
+        # Set initial text from combo box if no initial text provided
+        if not initial_text and self.PREDEFINED_MARKS:
+            initial_text = self.PREDEFINED_MARKS[0]
         self.text_edit.setPlainText(initial_text)
         # Use a monospaced font for the editor itself
         editor_font = QFont("Consolas", 11)
@@ -120,7 +133,7 @@ class MarkPropertiesDialog(QDialog):
         
         # 2. Options Area
         form_layout = QFormLayout()
-        
+
         # Font Selection
         self.font_combo = QComboBox()
         # Populate with common code/math fonts
@@ -133,22 +146,51 @@ class MarkPropertiesDialog(QDialog):
         # Fallback if preferred fonts aren't found
         if self.font_combo.count() == 0:
             self.font_combo.addItem("Monospace")
-        
+
         self.font_combo.setCurrentText(initial_font)
         form_layout.addRow("Font:", self.font_combo)
         
         # Size Selection
-        self.size_spin = QSpinBox()
-        self.size_spin.setRange(5, 50)
-        self.size_spin.setValue(initial_size)
-        form_layout.addRow("Text Size:", self.size_spin)
+        self.size_slider = QSlider(Qt.Orientation.Horizontal)
+        self.size_slider.setRange(5, 50)
+        self.size_slider.setValue(initial_size)
+        self.size_slider.setTickPosition(QSlider.TickPosition.TicksBelow)
+        self.size_slider.setTickInterval(5)
+
+        # Size value label
+        self.size_label = QLabel(f"{initial_size} pt")
+        self.size_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        # Layout for slider and label
+        size_layout = QHBoxLayout()
+        size_layout.addWidget(self.size_slider)
+        size_layout.addWidget(self.size_label)
+
+        form_layout.addRow("Text Size:", size_layout)
+
+        # Connect slider to update label
+        self.size_slider.valueChanged.connect(lambda value: self.size_label.setText(f"{value} pt"))
         
         # Width Selection
-        self.width_spin = QSpinBox()
-        self.width_spin.setRange(10, 200)
-        self.width_spin.setValue(initial_width)
-        self.width_spin.setSuffix(" chars")
-        form_layout.addRow("Max Width:", self.width_spin)
+        self.width_slider = QSlider(Qt.Orientation.Horizontal)
+        self.width_slider.setRange(10, 200)
+        self.width_slider.setValue(initial_width)
+        self.width_slider.setTickPosition(QSlider.TickPosition.TicksBelow)
+        self.width_slider.setTickInterval(20)
+
+        # Width value label
+        self.width_label = QLabel(f"{initial_width} chars")
+        self.width_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        # Layout for slider and label
+        width_layout = QHBoxLayout()
+        width_layout.addWidget(self.width_slider)
+        width_layout.addWidget(self.width_label)
+
+        form_layout.addRow("Max Width:", width_layout)
+
+        # Connect slider to update label
+        self.width_slider.valueChanged.connect(lambda value: self.width_label.setText(f"{value} chars"))
         
         layout.addLayout(form_layout)
         
@@ -158,12 +200,16 @@ class MarkPropertiesDialog(QDialog):
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
 
+    def on_mark_selected(self, text):
+        """Update text field when a mark is selected from the dropdown."""
+        self.text_edit.setPlainText(text)
+
     def get_data(self):
         return {
             "text": self.text_edit.toPlainText(),
             "font": self.font_combo.currentText(),
-            "size": self.size_spin.value(),
-            "width": self.width_spin.value()
+            "size": self.size_slider.value(),
+            "width": self.width_slider.value()
         }
 
 class LatexItem(QGraphicsPixmapItem):
