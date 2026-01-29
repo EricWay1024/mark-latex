@@ -12,7 +12,9 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QGraphicsView, QGraphics
                              QWidget, QVBoxLayout, QDialog, QTextEdit, QPushButton, 
                              QDialogButtonBox, QSpinBox, QComboBox, QFormLayout, QHBoxLayout)
 from PyQt6.QtGui import QPixmap, QImage, QAction, QColor, QFont, QFontDatabase, QPainterPath
-from PyQt6.QtCore import Qt, QBuffer, QIODevice
+from PyQt6.QtSvgWidgets import QGraphicsSvgItem
+from PyQt6.QtSvg import QSvgRenderer
+from PyQt6.QtCore import Qt, QBuffer, QIODevice, QByteArray
 
 # Use Agg backend for headless rendering
 matplotlib.use('Agg')
@@ -21,6 +23,7 @@ matplotlib.use('Agg')
 DEFAULT_FONT = "Fira Code"
 DEFAULT_SIZE = 10
 DEFAULT_WRAP = 50  # Characters before wrapping
+RENDER_DPI = 300  # DPI for Matplotlib rendering
 
 class CustomGraphicsView(QGraphicsView):
     """Custom QGraphicsView that supports horizontal scrolling with Shift + mouse wheel."""
@@ -175,6 +178,8 @@ class LatexItem(QGraphicsPixmapItem):
         self.setFlags(QGraphicsItem.GraphicsItemFlag.ItemIsMovable | 
                       QGraphicsItem.GraphicsItemFlag.ItemIsSelectable |
                       QGraphicsItem.GraphicsItemFlag.ItemSendsGeometryChanges)
+        # Apply scaling to match 72 DPI scene coordinates with 300 DPI rendered image
+        self.setScale(72 / RENDER_DPI)
         self.update_image()
 
     def update_image(self):
@@ -221,7 +226,7 @@ class MarkLatexApp(QMainWindow):
         self.pdf_path = None
         self.current_page_idx = 0
         self.all_marks = {}
-        self.view_scale = 8.0  # Increased to 8x for maximum resolution and clarity
+        # Removed view_scale - now using natural PDF coordinates (1:1 mapping)
 
         # -- UI --
         self.scene = QGraphicsScene()
@@ -344,22 +349,32 @@ class MarkLatexApp(QMainWindow):
         wrapped_text = "\n".join([textwrap.fill(line, width=wrap_width) for line in text.splitlines()])
 
         buf = io.BytesIO()
-        fig = plt.figure(figsize=(0.1, 0.1))
+        # Use a small initial figure size - bbox_inches='tight' will adjust it to fit the text
+        fig = plt.figure(figsize=(1, 1))
         fig.patch.set_alpha(0.0)
+        ax = fig.add_axes([0, 0, 1, 1])
+        ax.axis('off')
         
         try:
-            plt.text(0, 0, wrapped_text, 
-                     fontsize=font_size, 
-                     fontname=font_name,
-                     color='red', 
-                     va='bottom', ha='left')
+            # Use axes coordinates so the text anchors to the top-left corner
+            text_obj = ax.text(0, 1, wrapped_text,
+                               fontsize=font_size,
+                               fontname=font_name,
+                               color='red',
+                               va='top', ha='left',
+                               transform=ax.transAxes)
         except:
-            plt.text(0, 0, "FONT ERROR\n" + wrapped_text, fontsize=10, color='red')
-            
-        plt.axis('off')
-        
-        # High DPI for sharpness - increased to 600 to match 8x PDF resolution
-        plt.savefig(buf, format='png', bbox_inches='tight', pad_inches=0.05, dpi=600, transparent=True)
+            text_obj = ax.text(0, 1, "FONT ERROR\n" + wrapped_text, fontsize=8, color='red',
+                               va='top', ha='left', transform=ax.transAxes)
+
+        # Compute exact bounding box to avoid extra top/bottom margins
+        fig.canvas.draw()
+        renderer = fig.canvas.get_renderer()
+        bbox = text_obj.get_window_extent(renderer=renderer)
+        bbox_inches = bbox.transformed(fig.dpi_scale_trans.inverted())
+
+        # High DPI for sharpness - use RENDER_DPI constant
+        plt.savefig(buf, format='png', bbox_inches=bbox_inches, pad_inches=0.0, dpi=RENDER_DPI, transparent=True)
         plt.close(fig)
         buf.seek(0)
         return QPixmap.fromImage(QImage.fromData(buf.read()))
@@ -368,14 +383,34 @@ class MarkLatexApp(QMainWindow):
         if not self.doc: return
         self.scene.clear()
         
-        # Background
+        # Background - SVG-based rendering
         page = self.doc[self.current_page_idx]
-        pix = page.get_pixmap(matrix=fitz.Matrix(self.view_scale, self.view_scale))
-        img = QImage.fromData(pix.tobytes("ppm"))
-        bg = self.scene.addPixmap(QPixmap.fromImage(img))
-        bg.setZValue(-1)
-        bg.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, False)
-        self.scene.setSceneRect(0, 0, pix.width, pix.height)
+        
+        # Get SVG content from PDF page
+        svg_content = page.get_svg_image()
+        
+        # Convert SVG string to QByteArray
+        svg_data = QByteArray(svg_content.encode('utf-8'))
+        
+        # Create SVG renderer and item
+        svg_renderer = QSvgRenderer(svg_data)
+        svg_item = QGraphicsSvgItem()
+        svg_item.setSharedRenderer(svg_renderer)
+        
+        # Set position and size based on PDF page dimensions (1:1 mapping)
+        page_rect = page.rect
+        svg_item.setPos(0, 0)
+        svg_item.setScale(1.0)  # Natural scale - 1:1 with PDF coordinates
+        
+        # Configure SVG item properties
+        svg_item.setZValue(-1)
+        svg_item.setFlags(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable)
+        
+        # Add to scene
+        self.scene.addItem(svg_item)
+        
+        # Set scene rectangle to match PDF page size (natural coordinates)
+        self.scene.setSceneRect(page_rect.x0, page_rect.y0, page_rect.width, page_rect.height)
         
         self.lbl_status.setText(f" Page {self.current_page_idx + 1} / {len(self.doc)} ")
 
@@ -474,11 +509,11 @@ class MarkLatexApp(QMainWindow):
                 ba.open(QIODevice.OpenModeFlag.ReadWrite)
                 pix.toImage().save(ba, "PNG")
                 
-                # Coords
-                x = m['x'] / self.view_scale
-                y = m['y'] / self.view_scale
-                w = pix.width() / self.view_scale
-                h = pix.height() / self.view_scale
+                # Coords - Direct mapping since we use 1:1 PDF coordinates
+                x = m['x']
+                y = m['y']
+                w = pix.width() / RENDER_DPI * 72  # Convert from DPI to PDF points (72 DPI)
+                h = pix.height() / RENDER_DPI * 72
                 
                 # Check bounds
                 if x < min_x: min_x = x
