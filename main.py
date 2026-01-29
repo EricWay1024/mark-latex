@@ -391,8 +391,85 @@ class MarkLatexApp(QMainWindow):
         wrap_width = mark_data.get('width', DEFAULT_WRAP)
         
         # 1. Apply Wrapping
-        # We wrap lines manually to enforce the width limit
-        wrapped_text = "\n".join([textwrap.fill(line, width=wrap_width) for line in text.splitlines()])
+        # We wrap lines manually to enforce the width limit while keeping $...$ blocks intact.
+        def wrap_text(raw_text, width):
+            punctuation = ".,;:!?，。；：！？"
+
+            def wrap_line(line):
+                tokens = []
+                i = 0
+                current = ""
+                while i < len(line):
+                    ch = line[i]
+                    if ch.isspace():
+                        if current:
+                            tokens.append(current)
+                            current = ""
+                        # Collapse multiple spaces into a single delimiter token
+                        while i < len(line) and line[i].isspace():
+                            i += 1
+                        tokens.append(" ")
+                        continue
+                    if ch == "$":
+                        if current:
+                            tokens.append(current)
+                            current = ""
+                        end = line.find("$", i + 1)
+                        if end != -1:
+                            token = line[i:end + 1]
+                            i = end + 1
+                            while i < len(line) and line[i] in punctuation:
+                                token += line[i]
+                                i += 1
+                            tokens.append(token)
+                            continue
+                    current += ch
+                    i += 1
+                if current:
+                    tokens.append(current)
+
+                lines = []
+                current_line = ""
+                current_len = 0
+
+                for token in tokens:
+                    if token == " ":
+                        if current_line and not current_line.endswith(" "):
+                            if current_len + 1 > width:
+                                lines.append(current_line.rstrip())
+                                current_line = ""
+                                current_len = 0
+                            else:
+                                current_line += " "
+                                current_len += 1
+                        continue
+
+                    token_len = len(token)
+                    if not current_line:
+                        current_line = token
+                        current_len = token_len
+                        continue
+
+                    spacer = "" if current_line.endswith(" ") else " "
+                    extra_len = (1 if spacer else 0) + token_len
+                    if current_len + extra_len > width:
+                        lines.append(current_line.rstrip())
+                        current_line = token
+                        current_len = token_len
+                    else:
+                        current_line += spacer + token
+                        current_len += extra_len
+
+                if current_line:
+                    lines.append(current_line.rstrip())
+                return lines
+
+            wrapped_lines = []
+            for raw_line in raw_text.splitlines():
+                wrapped_lines.extend(wrap_line(raw_line))
+            return "\n".join(wrapped_lines)
+
+        wrapped_text = wrap_text(text, wrap_width)
 
         buf = io.BytesIO()
         # Use a small initial figure size - bbox_inches='tight' will adjust it to fit the text
