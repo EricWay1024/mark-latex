@@ -33,7 +33,7 @@ jobs:
         python build_simple.py
         
     - name: Upload executable
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: MarkLatex-Windows
         path: dist/MarkLatex.exe
@@ -44,7 +44,7 @@ jobs:
         Get-Content MarkLatex_SHA256.txt
         
     - name: Upload checksum
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: MarkLatex-Checksum
         path: MarkLatex_SHA256.txt
@@ -56,13 +56,13 @@ jobs:
     
     steps:
     - name: Download executable
-      uses: actions/download-artifact@v3
+      uses: actions/download-artifact@v4
       with:
         name: MarkLatex-Windows
-        path: dist/
+        path: di
         
     - name: Download checksum
-      uses: actions/download-artifact@v3
+      uses: actions/download-artifact@v4
       with:
         name: MarkLatex-Checksum
         path: ./
