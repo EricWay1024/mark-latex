@@ -756,55 +756,79 @@ class MarkLatexApp(QMainWindow):
         return f"{base}_marked.pdf"
 
     def export_pdf_with_marks(self, pdf_path, marks, out_path):
-        source_doc = fitz.open(pdf_path)
-        export_doc = fitz.open()
+        try:
+            # Open source document for in-place modification
+            doc = fitz.open(pdf_path)
+        except Exception as exc:
+            QMessageBox.critical(self, "Export Error", f"Could not open source PDF: {exc}")
+            return
 
-        # Normalize pages to rotation=0 for predictable coordinates
-        for page_index in range(len(source_doc)):
-            source_page = source_doc[page_index]
-            view_rect = source_page.rect
-            new_page = export_doc.new_page(width=view_rect.width, height=view_rect.height)
-            new_page.show_pdf_page(
-                fitz.Rect(0, 0, view_rect.width, view_rect.height),
-                source_doc,
-                page_index,
-                rotate=(-source_page.rotation) % 360
-            )
-        
         for p_idx, page_marks in marks.items():
-            if p_idx >= len(export_doc): continue
-            page = export_doc[p_idx]
-            source_page = source_doc[p_idx]
-            page_rect = page.rect
-            view_min_x, view_min_y, view_max_x, view_max_y = page_rect.x0, page_rect.y0, page_rect.x1, page_rect.y1
+            if p_idx >= len(doc): continue
             
+            page = doc[p_idx]
+            
+            # 1. Get the Matrix to map Visual (Screen) -> Physical (PDF)
+            derot_mat = page.derotation_matrix
+            
+            # 2. Track the "Physical" bounding box of the page + all marks
+            # Start with the existing page physical boundaries
+            final_phys_rect = fitz.Rect(page.mediabox)
+            
+            marks_to_render = []
+
             for m in page_marks:
                 pix = self.render_latex(m)
+                if pix.isNull(): continue
+
                 ba = QBuffer()
                 ba.open(QIODevice.OpenModeFlag.ReadWrite)
                 pix.toImage().save(ba, "PNG")
+                img_data = ba.data().data()
+
+                # Visual Coordinates (Screen)
+                vis_x = m['x']
+                vis_y = m['y']
+                vis_w = pix.width() * 72 / RENDER_DPI
+                vis_h = pix.height() * 72 / RENDER_DPI
+                vis_rect = fitz.Rect(vis_x, vis_y, vis_x + vis_w, vis_y + vis_h)
+
+                # Map to Physical Coordinates
+                phys_rect = vis_rect * derot_mat
                 
-                # Coords - Direct mapping since we use 1:1 PDF coordinates
-                x = m['x']
-                y = m['y']
-                w = pix.width() / RENDER_DPI * 72  # Convert from DPI to PDF points (72 DPI)
-                h = pix.height() / RENDER_DPI * 72
+                # Expand our "final" rectangle to include this mark
+                final_phys_rect |= phys_rect
+                
+                marks_to_render.append((phys_rect, img_data))
 
-                rect = fitz.Rect(x, y, x + w, y + h)
+            # 3. Apply Margin Symmetry/Expansion
+            # If marks pushed outside the original boundary, update the MediaBox
+            if final_phys_rect != page.mediabox:
+                page.set_mediabox(final_phys_rect)
+                # Also update CropBox so the new margin is visible
+                page.set_cropbox(final_phys_rect)
 
-                # Track bounds in view coordinates for margin extension
-                view_min_x = min(view_min_x, rect.x0)
-                view_min_y = min(view_min_y, rect.y0)
-                view_max_x = max(view_max_x, rect.x1)
-                view_max_y = max(view_max_y, rect.y1)
+            # 4. Insert Images with 180-degree Fix
+            for phys_rect, img_data in marks_to_render:
+                try:
+                    # HEURISTIC FIX: Add 180 degrees to the counter-rotation.
+                    # This flips the text 180 degrees to correct the "upside down" issue.
+                    page.insert_image(
+                        phys_rect, 
+                        stream=img_data, 
+                        rotate=-page.rotation + 180, 
+                        keep_proportion=True,
+                        overlay=True
+                    )
+                except Exception as e:
+                    print(f"Error inserting mark on page {p_idx}: {e}")
 
-                page.insert_image(rect, stream=ba.data().data())
-            
-            if view_min_x < page_rect.x0 or view_min_y < page_rect.y0 or view_max_x > page_rect.x1 or view_max_y > page_rect.y1:
-                view_rect = fitz.Rect(view_min_x, view_min_y, view_max_x, view_max_y)
-                page.set_mediabox(view_rect)
-
-        export_doc.save(out_path)
+        try:
+            doc.save(out_path)
+            doc.close()
+            QMessageBox.information(self, "Export Successful", f"Saved to: {out_path}")
+        except Exception as exc:
+            QMessageBox.critical(self, "Save Error", f"Could not save PDF: {exc}")
 
     def export_all_pdfs(self):
         if not self.file_list:
