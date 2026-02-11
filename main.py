@@ -570,37 +570,49 @@ class MarkLatexApp(QMainWindow):
             return "\n".join(wrapped_lines)
 
         wrapped_text = wrap_text(text, wrap_width)
+        def render_text(text_to_render):
+            buf = io.BytesIO()
+            # Use a small initial figure size - bbox_inches='tight' will adjust it to fit the text
+            fig = plt.figure(figsize=(1, 1))
+            fig.patch.set_alpha(0.0)
+            ax = fig.add_axes([0, 0, 1, 1])
+            ax.axis('off')
 
-        buf = io.BytesIO()
-        # Use a small initial figure size - bbox_inches='tight' will adjust it to fit the text
-        fig = plt.figure(figsize=(1, 1))
-        fig.patch.set_alpha(0.0)
-        ax = fig.add_axes([0, 0, 1, 1])
-        ax.axis('off')
-        
+            try:
+                # Use axes coordinates so the text anchors to the top-left corner
+                text_obj = ax.text(0, 1, text_to_render,
+                                   fontsize=font_size,
+                                   fontname=font_name,
+                                   color='red',
+                                   va='top', ha='left',
+                                   transform=ax.transAxes)
+            except Exception:
+                text_obj = ax.text(0, 1, "FONT ERROR\n" + text_to_render, fontsize=8, color='red',
+                                   va='top', ha='left', transform=ax.transAxes)
+
+            # Compute exact bounding box to avoid extra top/bottom margins
+            fig.canvas.draw()
+            renderer = fig.canvas.get_renderer()
+            bbox = text_obj.get_window_extent(renderer=renderer)
+            bbox_inches = bbox.transformed(fig.dpi_scale_trans.inverted())
+
+            # High DPI for sharpness - use RENDER_DPI constant
+            plt.savefig(buf, format='png', bbox_inches=bbox_inches, pad_inches=0.0, dpi=RENDER_DPI, transparent=True)
+            plt.close(fig)
+            buf.seek(0)
+            return QPixmap.fromImage(QImage.fromData(buf.read()))
+
         try:
-            # Use axes coordinates so the text anchors to the top-left corner
-            text_obj = ax.text(0, 1, wrapped_text,
-                               fontsize=font_size,
-                               fontname=font_name,
-                               color='red',
-                               va='top', ha='left',
-                               transform=ax.transAxes)
-        except:
-            text_obj = ax.text(0, 1, "FONT ERROR\n" + wrapped_text, fontsize=8, color='red',
-                               va='top', ha='left', transform=ax.transAxes)
-
-        # Compute exact bounding box to avoid extra top/bottom margins
-        fig.canvas.draw()
-        renderer = fig.canvas.get_renderer()
-        bbox = text_obj.get_window_extent(renderer=renderer)
-        bbox_inches = bbox.transformed(fig.dpi_scale_trans.inverted())
-
-        # High DPI for sharpness - use RENDER_DPI constant
-        plt.savefig(buf, format='png', bbox_inches=bbox_inches, pad_inches=0.0, dpi=RENDER_DPI, transparent=True)
-        plt.close(fig)
-        buf.seek(0)
-        return QPixmap.fromImage(QImage.fromData(buf.read()))
+            return render_text(wrapped_text)
+        except Exception as exc:
+            safe_text = wrapped_text.replace("$", "\\$")
+            error_text = "LATEX ERROR\n" + safe_text
+            if hasattr(self, "status_bar") and self.status_bar:
+                self.status_bar.showMessage(f"LaTeX render error: {exc}", 5000)
+            try:
+                return render_text(error_text)
+            except Exception:
+                return QPixmap()
 
     def render_current_page(self):
         if not self.doc: return
@@ -744,13 +756,27 @@ class MarkLatexApp(QMainWindow):
         return f"{base}_marked.pdf"
 
     def export_pdf_with_marks(self, pdf_path, marks, out_path):
-        export_doc = fitz.open(pdf_path)
+        source_doc = fitz.open(pdf_path)
+        export_doc = fitz.open()
+
+        # Normalize pages to rotation=0 for predictable coordinates
+        for page_index in range(len(source_doc)):
+            source_page = source_doc[page_index]
+            view_rect = source_page.rect
+            new_page = export_doc.new_page(width=view_rect.width, height=view_rect.height)
+            new_page.show_pdf_page(
+                fitz.Rect(0, 0, view_rect.width, view_rect.height),
+                source_doc,
+                page_index,
+                rotate=(-source_page.rotation) % 360
+            )
         
         for p_idx, page_marks in marks.items():
             if p_idx >= len(export_doc): continue
             page = export_doc[p_idx]
-            page_rect = page.rect 
-            min_x, min_y, max_x, max_y = page_rect.x0, page_rect.y0, page_rect.x1, page_rect.y1
+            source_page = source_doc[p_idx]
+            page_rect = page.rect
+            view_min_x, view_min_y, view_max_x, view_max_y = page_rect.x0, page_rect.y0, page_rect.x1, page_rect.y1
             
             for m in page_marks:
                 pix = self.render_latex(m)
@@ -763,17 +789,20 @@ class MarkLatexApp(QMainWindow):
                 y = m['y']
                 w = pix.width() / RENDER_DPI * 72  # Convert from DPI to PDF points (72 DPI)
                 h = pix.height() / RENDER_DPI * 72
-                
-                # Check bounds
-                if x < min_x: min_x = x
-                if y < min_y: min_y = y
-                if x + w > max_x: max_x = x + w
-                if y + h > max_y: max_y = y + h
-                
-                page.insert_image(fitz.Rect(x, y, x+w, y+h), stream=ba.data().data())
+
+                rect = fitz.Rect(x, y, x + w, y + h)
+
+                # Track bounds in view coordinates for margin extension
+                view_min_x = min(view_min_x, rect.x0)
+                view_min_y = min(view_min_y, rect.y0)
+                view_max_x = max(view_max_x, rect.x1)
+                view_max_y = max(view_max_y, rect.y1)
+
+                page.insert_image(rect, stream=ba.data().data())
             
-            if max_x > page_rect.x1 or max_y > page_rect.y1 or min_x < page_rect.x0 or min_y < page_rect.y0:
-                 page.set_mediabox(fitz.Rect(min_x, min_y, max_x, max_y))
+            if view_min_x < page_rect.x0 or view_min_y < page_rect.y0 or view_max_x > page_rect.x1 or view_max_y > page_rect.y1:
+                view_rect = fitz.Rect(view_min_x, view_min_y, view_max_x, view_max_y)
+                page.set_mediabox(view_rect)
 
         export_doc.save(out_path)
 
