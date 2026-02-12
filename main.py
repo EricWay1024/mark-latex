@@ -430,7 +430,7 @@ class MarkLatexApp(QMainWindow):
         self.current_student_folder = (
             self.file_student_folders[index] if self.is_moodle_mode else None
         )
-        self.doc = fitz.open(self.pdf_path)
+        self.doc = self.get_normalized_doc(self.pdf_path)
         self.current_page_idx = 0
         self.all_marks = {}
         self.undo_stack = []
@@ -439,6 +439,136 @@ class MarkLatexApp(QMainWindow):
         self.load_sidecar_data()
         self.render_current_page()
         self.setWindowTitle(f"MarkLatex - {os.path.basename(self.pdf_path)}")
+
+
+
+    def get_normalized_doc(self, pdf_path: str) -> fitz.Document | None:
+        """
+        Pre-flight Normalization:
+        Returns a fitz.Document where all pages are physically 0-rotation
+        and match the visual dimensions of the original file.
+
+        Vector-preserving approach (no pixmap rasterization):
+        - For rotated pages: temporarily set source rotation to 0, then place with rotate=old_rotation
+        - For unrotated pages: direct show_pdf_page copy
+        """
+        try:
+            raw_doc = fitz.open(pdf_path)
+        except Exception:
+            return None
+
+        # If no page needs rotation, return original doc to save memory.
+        if not any(page.rotation % 360 != 0 for page in raw_doc):
+            return raw_doc
+
+        clean_doc = fitz.open()
+
+        for page in raw_doc:
+            r = page.rotation % 360
+
+            # page.rect reflects the *visual* rectangle (rotation applied),
+            # which is what you want for your "visual dimensions" invariant.
+            vis_rect = page.rect
+
+            new_page = clean_doc.new_page(width=vis_rect.width, height=vis_rect.height)
+
+            if r == 0:
+                # no rotation, just copy (vector)
+                new_page.show_pdf_page(
+                    new_page.rect,
+                    raw_doc,
+                    page.number,
+                )
+                continue
+
+            # Rotated page: bake rotation into placed content (vector), output page stays rotation=0.
+            # Important: show_pdf_page rotates relative to an unrotated source page.
+            # So we temporarily set source page rotation to 0.
+            page.set_rotation(0)
+
+            new_page.show_pdf_page(
+                new_page.rect,
+                raw_doc,
+                page.number,
+                rotate=-r, # quite crucial here in a subtle way that no one can explains...
+            )
+
+            # Restore original rotation on the in-memory source doc object.
+            page.set_rotation(r)
+
+        raw_doc.close()
+        return clean_doc
+
+    # the following method uses a pixelizing approch which bloat the file size significantly
+    # hence we don't use it but it's the first approach that works...
+    # def get_normalized_doc(self, pdf_path):
+    #     """
+    #     Pre-flight Normalization:
+    #     Returns a fitz.Document where all pages are physically 0-rotation 
+    #     and match the visual dimensions of the original file.
+    #     """
+    #     try:
+    #         # 打开原始文件
+    #         raw_doc = fitz.open(pdf_path)
+    #     except Exception:
+    #         return None
+
+    #     # 检查是否有任何页面需要旋转。如果没有，直接返回原文档，节省内存。
+    #     # 注意：这里我们检查 rotation % 360 != 0 以防有 360 度这种奇怪的情况
+    #     if not any(page.rotation % 360 != 0 for page in raw_doc):
+    #         return raw_doc
+
+    #     # 创建一个新的、干净的内存 PDF
+    #     clean_doc = fitz.open()
+
+    #     for page in raw_doc:
+
+    #         if page.rotation != 0:
+    #             dpi = 100
+    #             zoom = dpi / 72  # 72 is default PDF DPI
+    #             mat = fitz.Matrix(zoom, zoom)
+                
+    #             # get_pixmap 自动处理了旋转！你不需要手动 rotate。
+    #             # 它返回的是“用户在屏幕上看到的样子”。
+    #             pix = page.get_pixmap(matrix=mat, alpha=False)
+
+    #             # 2. 创建新页面
+    #             # 使用图片的宽高 (pixels) 转换回 PDF 单位 (points)
+    #             # width = pix.width * 72 / dpi
+    #             # height = pix.height * 72 / dpi
+    #             # 或者直接用 page.rect (视觉尺寸)，通常是一致的
+                
+    #             # 关键：新页面的尺寸必须匹配图片的视觉尺寸
+    #             img_pdf_width = page.rect.width
+    #             img_pdf_height = page.rect.height
+                
+    #             new_page = clean_doc.new_page(width=img_pdf_width, height=img_pdf_height)
+
+    #             # 3. 插入图片
+    #             # 此时图片已经是“正”的了（get_pixmap 处理了），页面也是“正”的。
+    #             # 直接填满即可。
+    #             new_page.insert_image(
+    #                 new_page.rect, 
+    #                 stream=pix.tobytes()
+    #             )
+            
+    #         else:
+    #             new_page = clean_doc.new_page(width=page.rect.width, height=page.rect.height)
+    #             # no rotation, just copy 
+    #             new_page.show_pdf_page(
+    #                 new_page.rect,                # 填满新页面
+    #                 raw_doc,                      # 源文档
+    #                 page.number,                  # 页码
+    #                 # rotate=0,
+    #                 # # clip=page.cropbox,            # 关键：只渲染裁剪框内的内容
+    #                 # keep_proportion=True          # 关键：禁止拉伸
+    #             )
+
+    #     # 关闭原文档，释放文件句柄
+    #     raw_doc.close()
+        
+    #     # 返回新的、已经“转正”的文档
+    #     return clean_doc
 
     def sidebar_file_clicked(self, item):
         if item.parent() is None:
@@ -754,81 +884,165 @@ class MarkLatexApp(QMainWindow):
             return os.path.join(student_dir, f"{base_name}_marked.pdf")
         base = os.path.splitext(pdf_path)[0]
         return f"{base}_marked.pdf"
-
+    
     def export_pdf_with_marks(self, pdf_path, marks, out_path):
+
         try:
-            # Open source document for in-place modification
-            doc = fitz.open(pdf_path)
-        except Exception as exc:
-            QMessageBox.critical(self, "Export Error", f"Could not open source PDF: {exc}")
+            content_source_doc = self.get_normalized_doc(pdf_path)
+            export_doc = fitz.open()
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Could not open source: {e}")
             return
 
-        for p_idx, page_marks in marks.items():
-            if p_idx >= len(doc): continue
-            
-            page = doc[p_idx]
-            
-            # 1. Get the Matrix to map Visual (Screen) -> Physical (PDF)
-            derot_mat = page.derotation_matrix
-            
-            # 2. Track the "Physical" bounding box of the page + all marks
-            # Start with the existing page physical boundaries
-            final_phys_rect = fitz.Rect(page.mediabox)
+        for p_idx in range(len(content_source_doc)):
+            source_page = content_source_doc[p_idx]
+
+            # 1. 计算【原图 + 笔记】的总边界
+            # source_page.rect 是视觉边界（已经处理了旋转），这是我们想要的“基准”
+            total_rect = fitz.Rect(source_page.rect)
             
             marks_to_render = []
 
-            for m in page_marks:
-                pix = self.render_latex(m)
-                if pix.isNull(): continue
+            # 2. 收集这一页的所有笔记
+            if p_idx in marks:
+                for m in marks[p_idx]:
+                    pix = self.render_latex(m)
+                    if pix.isNull(): continue
 
-                ba = QBuffer()
-                ba.open(QIODevice.OpenModeFlag.ReadWrite)
-                pix.toImage().save(ba, "PNG")
-                img_data = ba.data().data()
+                    # 转换图片数据
+                    ba = QBuffer()
+                    ba.open(QIODevice.OpenModeFlag.ReadWrite)
+                    pix.toImage().save(ba, "PNG")
+                    img_data = ba.data().data()
 
-                # Visual Coordinates (Screen)
-                vis_x = m['x']
-                vis_y = m['y']
-                vis_w = pix.width() * 72 / RENDER_DPI
-                vis_h = pix.height() * 72 / RENDER_DPI
-                vis_rect = fitz.Rect(vis_x, vis_y, vis_x + vis_w, vis_y + vis_h)
+                    # 计算笔记的视觉大小
+                    w = pix.width() * 72 / RENDER_DPI
+                    h = pix.height() * 72 / RENDER_DPI
 
-                # Map to Physical Coordinates
-                phys_rect = vis_rect * derot_mat
-                
-                # Expand our "final" rectangle to include this mark
-                final_phys_rect |= phys_rect
-                
-                marks_to_render.append((phys_rect, img_data))
+                    # m['x'], m['y'] 已经是视觉坐标了
+                    m_rect = fitz.Rect(m['x'], m['y'], m['x'] + w, m['y'] + h)
+                    
+                    # 扩展总边界
+                    total_rect |= m_rect
+                    marks_to_render.append((m_rect, img_data))
 
-            # 3. Apply Margin Symmetry/Expansion
-            # If marks pushed outside the original boundary, update the MediaBox
-            if final_phys_rect != page.mediabox:
-                page.set_mediabox(final_phys_rect)
-                # Also update CropBox so the new margin is visible
-                page.set_cropbox(final_phys_rect)
+            # 3. 计算偏移量 (Smart Offset)
+            # 如果笔记写到了左边 (x<0) 或 上边 (y<0)，我们需要把所有内容往右/下平移
+            offset_x = -total_rect.x0 if total_rect.x0 < 0 else 0
+            offset_y = -total_rect.y0 if total_rect.y0 < 0 else 0
 
-            # 4. Insert Images with 180-degree Fix
-            for phys_rect, img_data in marks_to_render:
-                try:
-                    # HEURISTIC FIX: Add 180 degrees to the counter-rotation.
-                    # This flips the text 180 degrees to correct the "upside down" issue.
-                    page.insert_image(
-                        phys_rect, 
-                        stream=img_data, 
-                        rotate=-page.rotation + 180, 
-                        keep_proportion=True,
-                        overlay=True
-                    )
-                except Exception as e:
-                    print(f"Error inserting mark on page {p_idx}: {e}")
+            # 4. 创建新页面
+            # 尺寸就是总边界的宽和高
+            new_page = export_doc.new_page(width=total_rect.width, height=total_rect.height)
+
+            # 5. 绘制原 PDF 内容 (应用偏移 + 旋转修正)
+            dest_rect = fitz.Rect(
+                offset_x,
+                offset_y,
+                offset_x + source_page.rect.width,
+                offset_y + source_page.rect.height
+            )
+
+            # if source_page.rotation % 180 == 90:
+            #     # 如果是横向的，交换宽高
+            #     visual_clip = fitz.Rect(0, 0, source_page.cropbox.height, source_page.cropbox.width)
+            # else:
+            #     visual_clip = source_page.cropbox
+            
+            new_page.show_pdf_page(
+                dest_rect,                    # 目标位置
+                content_source_doc,           # 内容源
+                p_idx,                        # 页码
+                # clip=source_page.cropbox,     # 裁剪掉物理页面的隐藏边缘
+                # rotate=-source_page.rotation, # 【核心】必须逆向旋转才能填满框
+                # keep_proportion=True          # 保持比例
+            )
+
+            # 6. 绘制笔记 (应用偏移)
+            for m_rect, img_data in marks_to_render:
+                # 显式构造新的 Rect，加上偏移量
+                final_rect = fitz.Rect(
+                    m_rect.x0 + offset_x,
+                    m_rect.y0 + offset_y,
+                    m_rect.x1 + offset_x,
+                    m_rect.y1 + offset_y
+                )
+                new_page.insert_image(final_rect, stream=img_data)
 
         try:
-            doc.save(out_path)
-            doc.close()
-            QMessageBox.information(self, "Export Successful", f"Saved to: {out_path}")
+            export_doc.save(out_path)
+            export_doc.close()
+            content_source_doc.close()
+            print('exported!!')
+            # QMessageBox.information(self, "Export Successful", f"Saved to: {out_path}")
         except Exception as exc:
             QMessageBox.critical(self, "Save Error", f"Could not save PDF: {exc}")
+
+    # def export_pdf_with_marks(self, pdf_path, marks, out_path):
+    #     if not self.doc:
+    #         return
+
+    #     export_doc = fitz.open()
+
+    #     for p_idx in range(len(self.doc)):
+    #         source_page = self.doc[p_idx]
+
+    #         total_rect = fitz.Rect(source_page.rect)
+    #         marks_to_render = []
+
+    #         if p_idx in marks:
+    #             for m in marks[p_idx]:
+    #                 pix = self.render_latex(m)
+    #                 if pix.isNull():
+    #                     continue
+
+    #                 ba = QBuffer()
+    #                 ba.open(QIODevice.OpenModeFlag.ReadWrite)
+    #                 pix.toImage().save(ba, "PNG")
+    #                 img_data = ba.data().data()
+
+    #                 w = pix.width() * 72 / RENDER_DPI
+    #                 h = pix.height() * 72 / RENDER_DPI
+
+    #                 m_rect = fitz.Rect(m['x'], m['y'], m['x'] + w, m['y'] + h)
+    #                 total_rect |= m_rect
+    #                 marks_to_render.append((m_rect, img_data))
+
+    #         offset_x = -total_rect.x0 if total_rect.x0 < 0 else 0
+    #         offset_y = -total_rect.y0 if total_rect.y0 < 0 else 0
+
+    #         new_page = export_doc.new_page(width=total_rect.width, height=total_rect.height)
+
+    #         dest_rect = fitz.Rect(
+    #             offset_x,
+    #             offset_y,
+    #             offset_x + source_page.rect.width,
+    #             offset_y + source_page.rect.height
+    #         )
+            
+    #         new_page.show_pdf_page(
+    #             dest_rect,                  # 目标区域（已经加上了 offset）
+    #             self.doc,                   # 源文档
+    #             p_idx,                      # 页码
+    #             clip=source_page.cropbox,   # 【关键】只渲染可见区域，切掉乱七八糟的边缘
+    #             keep_proportion=True        # 【关键】保证不拉伸，不压缩
+    #         )
+
+    #         for m_rect, img_data in marks_to_render:
+    #             final_rect = fitz.Rect(
+    #                 m_rect.x0 + offset_x,
+    #                 m_rect.y0 + offset_y,
+    #                 m_rect.x1 + offset_x,
+    #                 m_rect.y1 + offset_y
+    #             )
+    #             new_page.insert_image(final_rect, stream=img_data)
+
+    #     try:
+    #         export_doc.save(out_path)
+    #         export_doc.close()
+    #         # QMessageBox.information(self, "Export Successful", f"Saved to: {out_path}")
+    #     except Exception as exc:
+    #         QMessageBox.critical(self, "Save Error", f"Could not save PDF: {exc}")
 
     def export_all_pdfs(self):
         if not self.file_list:
@@ -862,7 +1076,7 @@ class MarkLatexApp(QMainWindow):
             self.pdf_path = current_pdf_path
             self.current_student_folder = current_student_folder
             self.current_file_index = current_index
-            self.doc = fitz.open(current_pdf_path)
+            self.doc = self.get_normalized_doc(current_pdf_path)
             self.current_page_idx = current_page
             self.load_sidecar_data()
             self.render_current_page()
