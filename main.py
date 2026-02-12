@@ -815,13 +815,15 @@ class MarkLatexApp(QMainWindow):
         return f"{base}_marked.pdf"
     
     def export_pdf_with_marks(self, pdf_path, marks, out_path):
-
-        try:
-            content_source_doc = self.get_normalized_doc(pdf_path)
-            export_doc = fitz.open()
-        except Exception as e:
-            QMessageBox.critical(self, "Error", f"Could not open source: {e}")
-            return
+        content_source_doc = self.doc
+        if self.doc is None:
+            # mostly for testing purposes
+            try:
+                content_source_doc = self.get_normalized_doc(pdf_path)
+                export_doc = fitz.open()
+            except Exception as e:
+                QMessageBox.critical(self, "Error", f"Could not open source: {e}")
+                return
 
         for p_idx in range(len(content_source_doc)):
             source_page = content_source_doc[p_idx]
@@ -893,7 +895,7 @@ class MarkLatexApp(QMainWindow):
             export_doc.save(out_path)
             export_doc.close()
             content_source_doc.close()
-            print('exported!!')
+            # print('exported!!')
             # QMessageBox.information(self, "Export Successful", f"Saved to: {out_path}")
         except Exception as exc:
             QMessageBox.critical(self, "Save Error", f"Could not save PDF: {exc}")
