@@ -3,6 +3,8 @@ name: Build Windows Executable
 on:
   push:
     branches: [ main, master ]
+    tags:
+      - 'v*'
   pull_request:
     branches: [ main, master ]
   release:
@@ -59,30 +61,17 @@ jobs:
       uses: actions/download-artifact@v4
       with:
         name: MarkLatex-Windows
-        path: di
+        path: dist  # Fixed typo from 'di'
         
     - name: Download checksum
       uses: actions/download-artifact@v4
       with:
         name: MarkLatex-Checksum
-        path: ./
+        path: .
         
-    - name: Upload to release
-      uses: actions/upload-release-asset@v1
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    - name: Upload assets to release
+      uses: softprops/action-gh-release@v1
       with:
-        upload_url: ${{ github.event.release.upload_url }}
-        asset_path: ./dist/MarkLatex.exe
-        asset_name: MarkLatex.exe
-        asset_content_type: application/octet-stream
-        
-    - name: Upload checksum to release
-      uses: actions/upload-release-asset@v1
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      with:
-        upload_url: ${{ github.event.release.upload_url }}
-        asset_path: ./MarkLatex_SHA256.txt
-        asset_name: MarkLatex_SHA256.txt
-        asset_content_type: text/plain
+        files: |
+          dist/MarkLatex.exe
+          MarkLatex_SHA256.txt
