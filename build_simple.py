@@ -51,7 +51,7 @@ def main():
     try:
         # Run PyInstaller
         result = subprocess.run(pyinstaller_cmd, check=True, capture_output=True, text=True)
-        print("✓ Build successful!")
+        print("Build successful!")
         
         # Show output
         if result.stdout:
@@ -63,7 +63,7 @@ def main():
         
         if exe_file.exists():
             size_mb = exe_file.stat().st_size / (1024*1024)
-            print(f"✓ Executable created: {exe_file}")
+            print(f"Executable created: {exe_file}")
             print(f"  File size: {size_mb:.1f} MB")
             print(f"  Location: {exe_file.absolute()}")
             
@@ -72,11 +72,11 @@ def main():
             
             return 0
         else:
-            print("✗ Warning: Executable not found in expected location")
+            print("Warning: Executable not found in expected location")
             return 1
             
     except subprocess.CalledProcessError as e:
-        print(f"✗ Build failed!")
+        print("Build failed!")
         print(f"Error: {e}")
         if e.stdout:
             print("STDOUT:", e.stdout)
@@ -84,7 +84,7 @@ def main():
             print("STDERR:", e.stderr)
         return 1
     except Exception as e:
-        print(f"✗ Unexpected error: {e}")
+        print(f"Unexpected error: {e}")
         return 1
 
 def create_distribution_readme(exe_file, size_mb):
@@ -125,7 +125,7 @@ For more information, see the main README.md file.
     with open(readme_path, "w") as f:
         f.write(readme_content)
     
-    print(f"✓ Created distribution README: {readme_path}")
+    print(f"Created distribution README: {readme_path}")
 
 if __name__ == "__main__":
     sys.exit(main())
